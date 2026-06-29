@@ -21,6 +21,13 @@ type ReviewProgress = {
 };
 
 type ReviewProgressMap = Record<string, ReviewProgress>;
+type VocabularyExportPayload = {
+  version: 1;
+  exportedAt: string;
+  words: VocabularyWord[];
+  reviewProgress: ReviewProgressMap;
+};
+type SessionSummary = Record<ReviewBucket, number>;
 
 const STORAGE_KEY = "vocabulary-studio.words";
 const REVIEW_STORAGE_KEY = "vocabulary-studio.reviewProgress";
@@ -99,24 +106,40 @@ const emptyForm: WordFormState = {
   status: "New"
 };
 
+function createEmptySessionSummary(): SessionSummary {
+  return {
+    Again: 0,
+    Good: 0,
+    Easy: 0
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function isVocabularyWord(value: unknown): value is VocabularyWord {
-  if (!value || typeof value !== "object") {
+  if (!isRecord(value)) {
     return false;
   }
 
   const word = value as Partial<VocabularyWord>;
   return (
     typeof word.id === "string" &&
+    word.id.trim().length > 0 &&
     typeof word.term === "string" &&
+    word.term.trim().length > 0 &&
     typeof word.meaning === "string" &&
+    word.meaning.trim().length > 0 &&
     typeof word.example === "string" &&
+    word.example.trim().length > 0 &&
     typeof word.status === "string" &&
     statuses.includes(word.status as LearningStatus)
   );
 }
 
 function isReviewProgress(value: unknown): value is ReviewProgress {
-  if (!value || typeof value !== "object") {
+  if (!isRecord(value)) {
     return false;
   }
 
@@ -132,6 +155,75 @@ function isReviewProgress(value: unknown): value is ReviewProgress {
     typeof progress.nextDueAt === "string" &&
     Number.isFinite(Date.parse(progress.nextDueAt))
   );
+}
+
+function hasUniqueWordIds(words: VocabularyWord[]): boolean {
+  return new Set(words.map((word) => word.id)).size === words.length;
+}
+
+function isReviewProgressMapForWords(
+  value: unknown,
+  validWordIds: Set<string>
+): value is ReviewProgressMap {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return Object.entries(value).every(
+    ([wordId, progress]) => validWordIds.has(wordId) && isReviewProgress(progress)
+  );
+}
+
+function isVocabularyExportPayload(value: unknown): value is VocabularyExportPayload {
+  if (!isRecord(value) || value.version !== 1 || typeof value.exportedAt !== "string") {
+    return false;
+  }
+
+  if (!Number.isFinite(Date.parse(value.exportedAt)) || !Array.isArray(value.words)) {
+    return false;
+  }
+
+  if (!value.words.every(isVocabularyWord) || !hasUniqueWordIds(value.words)) {
+    return false;
+  }
+
+  return isReviewProgressMapForWords(
+    value.reviewProgress,
+    new Set(value.words.map((word) => word.id))
+  );
+}
+
+function createExportPayload(
+  words: VocabularyWord[],
+  reviewProgress: ReviewProgressMap
+): VocabularyExportPayload {
+  const wordIds = new Set(words.map((word) => word.id));
+  const exportableProgress = Object.entries(reviewProgress).reduce<ReviewProgressMap>(
+    (progressMap, [wordId, progress]) => {
+      if (wordIds.has(wordId)) {
+        progressMap[wordId] = progress;
+      }
+
+      return progressMap;
+    },
+    {}
+  );
+
+  return {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    words,
+    reviewProgress: exportableProgress
+  };
+}
+
+function parseImportPayload(source: string): VocabularyExportPayload | null {
+  try {
+    const parsed: unknown = JSON.parse(source);
+    return isVocabularyExportPayload(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function loadStoredWords(): VocabularyWord[] {
@@ -219,6 +311,11 @@ export function App() {
   const [activeView, setActiveView] = useState<ActiveView>("library");
   const [studyIndex, setStudyIndex] = useState(0);
   const [answerVisible, setAnswerVisible] = useState(false);
+  const [exportJson, setExportJson] = useState("");
+  const [importJson, setImportJson] = useState("");
+  const [importError, setImportError] = useState("");
+  const [importStatus, setImportStatus] = useState("");
+  const [sessionSummary, setSessionSummary] = useState<SessionSummary>(createEmptySessionSummary);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(words));
@@ -259,6 +356,10 @@ export function App() {
   const formTitle = editingWord ? `Editing ${editingWord.term}` : "Add a word";
   const studyWord = dueWords[studyIndex] ?? dueWords[0];
   const currentStudyProgress = studyWord ? reviewProgress[studyWord.id] : undefined;
+  const sessionReviewedCount = reviewBuckets.reduce(
+    (total, bucket) => total + sessionSummary[bucket],
+    0
+  );
 
   useEffect(() => {
     if (studyIndex >= dueWords.length && dueWords.length > 0) {
@@ -326,6 +427,34 @@ export function App() {
     }
   }
 
+  function handleExport() {
+    setExportJson(JSON.stringify(createExportPayload(words, reviewProgress), null, 2));
+    setImportError("");
+    setImportStatus("Export ready. Copy the JSON when you want to move this library.");
+  }
+
+  function handleImport() {
+    const payload = parseImportPayload(importJson);
+
+    if (!payload) {
+      setImportError("Import failed: JSON must include valid vocabulary words and review progress.");
+      setImportStatus("");
+      return;
+    }
+
+    setWords(payload.words);
+    setReviewProgress(payload.reviewProgress);
+    setSearchTerm("");
+    setStatusFilter("All");
+    setStudyIndex(0);
+    setAnswerVisible(false);
+    setSessionSummary(createEmptySessionSummary());
+    setImportError("");
+    setImportStatus(`Import complete. ${payload.words.length} words restored.`);
+    setExportJson("");
+    resetForm();
+  }
+
   function showView(view: ActiveView) {
     setActiveView(view);
     setAnswerVisible(false);
@@ -351,6 +480,10 @@ export function App() {
         lastReviewedAt: reviewedAt.toISOString(),
         nextDueAt: nextDue.toISOString()
       }
+    }));
+    setSessionSummary((current) => ({
+      ...current,
+      [bucket]: current[bucket] + 1
     }));
     setAnswerVisible(false);
   }
@@ -425,69 +558,112 @@ export function App() {
 
       {activeView === "library" ? (
       <section className="workspace" aria-label="Vocabulary workspace">
-        <form className="word-form" onSubmit={handleSubmit} aria-labelledby="word-form-title">
-          <div className="section-heading">
-            <p className="section-kicker">Editor</p>
-            <h2 id="word-form-title">{formTitle}</h2>
-          </div>
+        <div className="workspace-sidebar">
+          <form className="word-form" onSubmit={handleSubmit} aria-labelledby="word-form-title">
+            <div className="section-heading">
+              <p className="section-kicker">Editor</p>
+              <h2 id="word-form-title">{formTitle}</h2>
+            </div>
 
-          <label>
-            <span>Word</span>
-            <input
-              value={formState.term}
-              onChange={(event) => updateFormField("term", event.target.value)}
-              placeholder="e.g. ephemeral"
-              required
-            />
-          </label>
+            <label>
+              <span>Word</span>
+              <input
+                value={formState.term}
+                onChange={(event) => updateFormField("term", event.target.value)}
+                placeholder="e.g. ephemeral"
+                required
+              />
+            </label>
 
-          <label>
-            <span>Meaning</span>
-            <textarea
-              value={formState.meaning}
-              onChange={(event) => updateFormField("meaning", event.target.value)}
-              placeholder="Short definition"
-              required
-              rows={3}
-            />
-          </label>
+            <label>
+              <span>Meaning</span>
+              <textarea
+                value={formState.meaning}
+                onChange={(event) => updateFormField("meaning", event.target.value)}
+                placeholder="Short definition"
+                required
+                rows={3}
+              />
+            </label>
 
-          <label>
-            <span>Example sentence</span>
-            <textarea
-              value={formState.example}
-              onChange={(event) => updateFormField("example", event.target.value)}
-              placeholder="Use the word in context"
-              required
-              rows={3}
-            />
-          </label>
+            <label>
+              <span>Example sentence</span>
+              <textarea
+                value={formState.example}
+                onChange={(event) => updateFormField("example", event.target.value)}
+                placeholder="Use the word in context"
+                required
+                rows={3}
+              />
+            </label>
 
-          <label>
-            <span>Status</span>
-            <select
-              value={formState.status}
-              onChange={(event) => updateFormField("status", event.target.value as LearningStatus)}
-            >
-              {statuses.map((status) => (
-                <option key={status} value={status}>
-                  {status}
-                </option>
-              ))}
-            </select>
-          </label>
+            <label>
+              <span>Status</span>
+              <select
+                value={formState.status}
+                onChange={(event) => updateFormField("status", event.target.value as LearningStatus)}
+              >
+                {statuses.map((status) => (
+                  <option key={status} value={status}>
+                    {status}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          <div className="form-actions">
-            <button type="submit" className="primary-action">
-              {editingId ? "Save changes" : "Add word"}
-            </button>
-            {editingId ? (
-              <button type="button" className="secondary-action" onClick={resetForm}>
-                Cancel
+            <div className="form-actions">
+              <button type="submit" className="primary-action">
+                {editingId ? "Save changes" : "Add word"}
               </button>
+              {editingId ? (
+                <button type="button" className="secondary-action" onClick={resetForm}>
+                  Cancel
+                </button>
+              ) : null}
+            </div>
+          </form>
+
+          <section className="data-panel" aria-labelledby="data-tools-title">
+            <div className="section-heading">
+              <p className="section-kicker">Portability</p>
+              <h2 id="data-tools-title">Import and export</h2>
+            </div>
+
+            <button type="button" className="secondary-action" onClick={handleExport}>
+              Export JSON
+            </button>
+
+            {exportJson ? (
+              <label>
+                <span>Export JSON</span>
+                <textarea readOnly value={exportJson} rows={7} />
+              </label>
             ) : null}
-          </div>
-        </form>
+
+            <label>
+              <span>Import JSON</span>
+              <textarea
+                value={importJson}
+                onChange={(event) => setImportJson(event.target.value)}
+                placeholder="Paste exported vocabulary JSON"
+                rows={6}
+              />
+            </label>
+
+            <div className="form-actions">
+              <button type="button" className="primary-action" onClick={handleImport}>
+                Import JSON
+              </button>
+            </div>
+
+            {importError ? (
+              <p className="import-error" role="alert">
+                {importError}
+              </p>
+            ) : null}
+            {importStatus ? <p className="import-status">{importStatus}</p> : null}
+          </section>
+        </div>
 
         <section className="library" aria-labelledby="library-title">
           <div className="library-header">
@@ -616,6 +792,24 @@ export function App() {
               <p>Every saved word has review progress scheduled for later.</p>
             </div>
           )}
+
+          {sessionReviewedCount > 0 ? (
+            <section className="session-summary" aria-label="Study session summary">
+              <p className="section-kicker">Session summary</p>
+              <dl>
+                <div>
+                  <dt>Reviewed</dt>
+                  <dd>{sessionReviewedCount}</dd>
+                </div>
+                {reviewBuckets.map((bucket) => (
+                  <div key={bucket}>
+                    <dt>{bucket}</dt>
+                    <dd>{sessionSummary[bucket]}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+          ) : null}
         </section>
       )}
     </main>
