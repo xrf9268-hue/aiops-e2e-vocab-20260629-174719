@@ -92,4 +92,55 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "meticulous" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "lucid" })).not.toBeInTheDocument();
   });
+
+  it("runs a study review by revealing the answer before recording progress", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Study" }));
+
+    expect(screen.getByRole("heading", { name: /study mode/i })).toBeInTheDocument();
+    expect(screen.getByTestId("study-card")).toHaveTextContent("meticulous");
+    expect(screen.queryByText(/showing great attention to detail/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Reviews: 0")).toBeInTheDocument();
+    expect(screen.getByText("Due now")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Check answer" }));
+
+    expect(screen.getByText(/showing great attention to detail/i)).toBeInTheDocument();
+    expect(screen.getByText(/the meticulous editor caught every typo/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Good" }));
+
+    const storedProgress = JSON.parse(localStorage.getItem("vocabulary-studio.reviewProgress") ?? "{}");
+    expect(storedProgress["seed-meticulous"]).toMatchObject({
+      bucket: "Good",
+      reviewCount: 1
+    });
+    expect(storedProgress["seed-meticulous"].lastReviewedAt).toEqual(expect.any(String));
+    expect(storedProgress["seed-meticulous"].nextDueAt).toEqual(expect.any(String));
+
+    fireEvent.click(screen.getByRole("button", { name: "Library" }));
+
+    expect(screen.getByText("Review: Good")).toBeInTheDocument();
+    expect(screen.getByText("Reviews: 1")).toBeInTheDocument();
+  });
+
+  it("supports keyboard shortcuts for revealing and grading study cards", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Study" }));
+
+    const studyCard = screen.getByTestId("study-card");
+    fireEvent.keyDown(studyCard, { key: "Enter" });
+
+    expect(screen.getByText(/showing great attention to detail/i)).toBeInTheDocument();
+
+    fireEvent.keyDown(studyCard, { key: "3" });
+
+    const storedProgress = JSON.parse(localStorage.getItem("vocabulary-studio.reviewProgress") ?? "{}");
+    expect(storedProgress["seed-meticulous"]).toMatchObject({
+      bucket: "Easy",
+      reviewCount: 1
+    });
+  });
 });
